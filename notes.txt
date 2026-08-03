@@ -1,0 +1,27 @@
+05/27/26
+
+make clean && make && ./mtr 1  (very specific output)
+or ./mtr input_3body.txt (for general)  (t, E, L)
+
+reference:
+nstep  = 10001
+dE/E   = 5.3417548104324876e-07
+dLz/Lz = 3.9469015090133715e-14
+
+
+
+
+
+I've designed a test for Matlab
+
+dE = -1.678262918358016e-07, if I run with symbabintwo(0.01*365.25, 1*365.25)
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+07/16/26
+./mtr2 new values
+dE/E     = -1.0232808898461527e-06
+dLz/Lz   = -3.6895852393444498e-14
+
+original, today 07/16/26
+dE/E     = -4.6261826717929158e-07
+dLz/Lz   = -3.6575018894371071e-14
