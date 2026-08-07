@@ -1,4 +1,5 @@
 #include "mtr.h"
+#include <sys/stat.h>
 
 int    G_FLAG    = 0;
 double G_RHILL   = 0.0;
@@ -44,6 +45,9 @@ int main(int argc, char *argv[])
     double rlev[LEVMAX], hlev[LEVMAX], rlev_sq[LEVMAX];
 
     double *m   = NULL;
+    double dt_snap = 0.0;
+    char   snap_dir[256] = "snap";
+    int    snap_every = 0;
     double **q  = NULL, **v  = NULL;
     double **Q  = NULL, **P  = NULL;
     int    **levc = NULL;
@@ -129,6 +133,8 @@ int main(int argc, char *argv[])
         output_interval = sim.output_interval;
         G_FLAG          = sim.flag;
         G_RHILL         = sim.rhill;
+        dt_snap         = sim.dt_snap;
+        strcpy(snap_dir, sim.snap_dir);
         m    = sim.m;
         Q    = alloc2d(3, n); P = alloc2d(3, n);
         levc = alloc2d_int(n, n);
@@ -183,6 +189,14 @@ int main(int argc, char *argv[])
         fprintf(fcons, "%.16e %.16e\n", 0.0, E0);
     }
 
+    /* Snapshot setup (general input-file case only) */
+    if (dt_snap > 0.0) {
+        snap_every = (int)(dt_snap / h + 0.5);
+        if (snap_every < 1) snap_every = 1;
+        mkdir(snap_dir, 0755);
+        write_snapshot(snap_dir, 0, 0.0, m, Q, v, n);
+    }
+
     /* Main integration loop */
     t     = 0.0;
     nstep = 0;
@@ -213,6 +227,9 @@ int main(int argc, char *argv[])
                 fprintf(fcons, "%.16e %.16e\n", t, E);
             }
         }
+
+        if (snap_every > 0 && nstep % snap_every == 0)
+            write_snapshot(snap_dir, nstep / snap_every, t, m, Q, v, n);
     }
 
     /* Final diagnostics */

@@ -81,3 +81,74 @@ void calcorb(double **Q, double **v, double *m, int ik, int jk,
     *em = sqrt(e[0]*e[0] + e[1]*e[1] + e[2]*e[2]);
     *a  = 1.0 / (2.0 / qrm - vrm2 / mudan);
 }
+
+/* --- Snapshot output (Below 2 functions are the ONLY addition to David's code) --- */
+static void calcorb_helio(double mu, const double dx[3], const double dv[3],
+                          double *a, double *e, double *inc)
+{
+    double r, v2, rv, hvec[3], hmag, evec[3];
+    int k;
+
+    r  = sqrt(dx[0]*dx[0] + dx[1]*dx[1] + dx[2]*dx[2]);
+    v2 = dv[0]*dv[0] + dv[1]*dv[1] + dv[2]*dv[2];
+    rv = dx[0]*dv[0] + dx[1]*dv[1] + dx[2]*dv[2];
+
+    hvec[0] = dx[1]*dv[2] - dx[2]*dv[1];
+    hvec[1] = dx[2]*dv[0] - dx[0]*dv[2];
+    hvec[2] = dx[0]*dv[1] - dx[1]*dv[0];
+    hmag = sqrt(hvec[0]*hvec[0] + hvec[1]*hvec[1] + hvec[2]*hvec[2]);
+
+    *a = 1.0 / (2.0 / r - v2 / mu);
+
+    for (k = 0; k < 3; k++)
+        evec[k] = ((v2 - mu / r) * dx[k] - rv * dv[k]) / mu;
+    *e = sqrt(evec[0]*evec[0] + evec[1]*evec[1] + evec[2]*evec[2]);
+
+    *inc = (hmag > 0.0) ? acos(hvec[2] / hmag) : 0.0;
+}
+
+/* GPLUM-compatible snapshot (heliocentric, central body NOT included) with (a, e, inc)*/
+void write_snapshot(const char *dir, int isnap, double t,
+                    double *m, double **Q, double **v, int n)
+{
+    char fname[512];
+    FILE *fp;
+    double **x      = alloc2d(3, n);
+    double **Pdummy = alloc2d(3, n);
+    double **pdummy = alloc2d(3, n);
+    double dx[3], dv[3];
+    double a, e, inc;
+    int i, k;
+
+    convert2cart(m, n, Q, Pdummy, x, pdummy);
+
+    snprintf(fname, sizeof(fname), "%s/snap%06d.dat", dir, isnap);
+    fp = fopen(fname, "w");
+    if (!fp) {
+        fprintf(stderr, "write_snapshot: cannot open '%s'\n", fname);
+        free2d(x, 3); free2d(Pdummy, 3); free2d(pdummy, 3);
+        return;
+    }
+
+    fprintf(fp, "%.15e\t%d\t%d", t, n - 1, n - 1);
+    for (k = 0; k < 10; k++) fprintf(fp, "\t%.15e", 0.0);
+    fprintf(fp, "\n");
+
+    for (i = 1; i < n; i++) {
+        for (k = 0; k < 3; k++) {
+            dx[k] = x[k][i] - x[k][0];
+            dv[k] = v[k][i] - v[k][0];
+        }
+        calcorb_helio(GNEWT * (m[0] + m[i]), dx, dv, &a, &e, &inc);
+        fprintf(fp,
+            "%d\t%.15e\t%.15e\t%.15e\t"
+            "%.15e\t%.15e\t%.15e\t%.15e\t%.15e\t%.15e\t"
+            "%d\t%d\t%.15e\t%.15e\t%.15e\n",
+            i - 1, m[i], 0.0, 1.0,
+            dx[0], dx[1], dx[2], dv[0], dv[1], dv[2],
+            0, 0, a, e, inc);
+    }
+
+    fclose(fp);
+    free2d(x, 3); free2d(Pdummy, 3); free2d(pdummy, 3);
+}

@@ -73,6 +73,8 @@ typedef struct {
     int    flag;                 /* 0 = timescale criterion, 1 = Hill radius  */
     double rhill;                /* Hill radius (au), used if flag==1         */
     int    cas;                  /* coordinate case (1 = Dem. Heliocentric)   */
+    double dt_snap;              /* snapshot interval; 0 = no snapshots       */
+    char   snap_dir[256];        /* snapshot output directory                 */
 } SimState;
 
 /* ─── Pair list ──────────────────────────────────────────────────────────── */
@@ -246,6 +248,8 @@ void   consqv(double *m, int n, double **Q, double **v,
               double *E, double L[3]);
 void   calcorb(double **Q, double **v, double *m,
                int ik, int jk, double *a, double *em);
+void   write_snapshot(const char *dir, int isnap, double t,
+                      double *m, double **Q, double **v, int n);
 
 /* init.c */
 void   initv(double h, double rmax, double rsub, int hsub, int levtot,

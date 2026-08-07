@@ -135,6 +135,8 @@ void read_input(const char *fname, SimState *sim, double **q, double **v)
     sim->n = 0; sim->h = 1.0; sim->tmax = 365250.0;
     sim->output_interval = 1; sim->flag = 0;
     sim->hsub = 3; sim->rhill = 0.0;
+    sim->dt_snap = 0.0;
+    strcpy(sim->snap_dir, "snap");
 
     while (fgets(line, sizeof(line), fp)) {
         if (line[0] == '#' || line[0] == '\n') continue;
@@ -149,6 +151,9 @@ void read_input(const char *fname, SimState *sim, double **q, double **v)
             else if (strcmp(key, "levtot")          == 0) levtot               = (int)val;
             else if (strcmp(key, "flag")            == 0) sim->flag            = (int)val;
             else if (strcmp(key, "rhill")           == 0) sim->rhill           = val;
+            else if (strcmp(key, "dt_snap")         == 0) sim->dt_snap         = val;
+        } else if (sscanf(line, "%s", key) == 1 && strcmp(key, "snap_dir") == 0) {
+            sscanf(line, "%*s %255s", sim->snap_dir);
         }
     }
 
