@@ -20,27 +20,6 @@
    Helper: PairList operations (beyond those in mtr.h)
    ─────────────────────────────────────────────────────────────────────────── */
 
-static int pl_contains(PairList *pl, int i, int j)
-{
-    int k;
-    if (i > j) { int tmp = i; i = j; j = tmp; }
-    for (k = 0; k < pl->n; k++)
-        if (pl->p[k].i == i && pl->p[k].j == j) return 1;
-    return 0;
-}
-
-static void pl_unique(PairList *pl)
-{
-    PairList tmp;
-    int k;
-    pl_init(&tmp, pl->n > 0 ? pl->n : 1);
-    for (k = 0; k < pl->n; k++)
-        if (!pl_contains(&tmp, pl->p[k].i, pl->p[k].j))
-            pl_append(&tmp, pl->p[k].i, pl->p[k].j);
-    pl_free(pl);
-    *pl = tmp;
-}
-
 static void pl_all_pairs(PairList *pl, int n)
 {
     int i, j;
@@ -192,45 +171,39 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
             if (lij >= lev && (inR[i] || inR[j]))
                 pl_append(&arru_new, i, j);
         }
-        pl_unique(&arru_new);
+        /* pl_unique removed: arru_new is a filter of a duplicate-free list */
         pl_free(arru);
         *arru = arru_new;
         free(inR);
 
         n_repeat = 0;
-        for (k = 0; k < arru->n; k++) {
-            int i = arru->p[k].i;
-            int j = arru->p[k].j;
-            int found_i = 0, found_j = 0, b2;
-            for (b2 = 0; b2 < n_repeat; b2++) {
-                if (id_repeat[b2] == i) found_i = 1;
-                if (id_repeat[b2] == j) found_j = 1;
+        {
+            char *seen = (char *)calloc(n, 1);
+            if (!seen) { fprintf(stderr, "update_levels: malloc failed\n"); exit(1); }
+            for (k = 0; k < arru->n; k++) {
+                int i = arru->p[k].i;
+                int j = arru->p[k].j;
+                if (!seen[i]) { seen[i] = 1; id_repeat[n_repeat++] = i; }
+                if (!seen[j]) { seen[j] = 1; id_repeat[n_repeat++] = j; }
             }
-            if (!found_i) id_repeat[n_repeat++] = i;
-            if (!found_j) id_repeat[n_repeat++] = j;
-        }
-
-        /* Rare edge case: simultaneous disjoint demotion */
-        if (is_final && any_neg) {
-            for (k = 0; k < indv_neg.n; k++) {
-                int i = indv_neg.p[k].i;
-                int j = indv_neg.p[k].j;
-                int in_repeat_i = 0, in_repeat_j = 0, b2;
-                for (b2 = 0; b2 < n_repeat; b2++) {
-                    if (id_repeat[b2] == i) in_repeat_i = 1;
-                    if (id_repeat[b2] == j) in_repeat_j = 1;
-                }
-                if (!in_repeat_i && !in_repeat_j) {
-                    levc[i][j]--;
-                    levc[j][i]--;
-                    G_RARE_EDGE++;
-                    if (G_RARE_FILE)
-                        fprintf(G_RARE_FILE, "%.6f  %s  %d\n",
-                                G_TIME / 365.25,
-                                G_RARE_FWD ? "fwd" : "bwd",
-                                G_RARE_N);
+            /* membership test for the rare-edge block below */
+            if (is_final && any_neg) {
+                for (k = 0; k < indv_neg.n; k++) {
+                    int i = indv_neg.p[k].i;
+                    int j = indv_neg.p[k].j;
+                    if (!seen[i] && !seen[j]) {
+                        levc[i][j]--;
+                        levc[j][i]--;
+                        G_RARE_EDGE++;
+                        if (G_RARE_FILE)
+                            fprintf(G_RARE_FILE, "%.6f  %s  %d\n",
+                                    G_TIME / 365.25,
+                                    G_RARE_FWD ? "fwd" : "bwd",
+                                    G_RARE_N);
+                    }
                 }
             }
+            free(seen);
         }
 
         /* Reset positions and velocities */
@@ -307,7 +280,7 @@ void driftop(double **Q, double **v, double *m,
         if (levc[pi][pj] >= lev)
             pl_append(&arru, pi, pj);
     }
-    pl_unique(&arru);
+    /* pl_unique removed */
 
     for (i = 1; i <= hsub; i++) {
         int loop = 0;
@@ -353,12 +326,16 @@ void driftop(double **Q, double **v, double *m,
                 }
             }
 
+            /* Deepest level among the ACTIVE pairs only: deeper levels can
+               only ever act on pairs in arru, so scanning all n x n entries
+               is unnecessary (and costs O(N^2) per substep). */
             levmax = 0;
             {
-                int pi, pj;
-                for (pi = 0; pi < n; pi++)
-                    for (pj = 0; pj < n; pj++)
-                        if (levc[pi][pj] > levmax) levmax = levc[pi][pj];
+                int p;
+                for (p = 0; p < arru.n; p++) {
+                    int l = levc[arru.p[p].i][arru.p[p].j];
+                    if (l > levmax) levmax = l;
+                }
             }
 
             if (lev < levmax)
@@ -404,7 +381,7 @@ void driftop(double **Q, double **v, double *m,
                         if (levc[pi][pj] >= lev)
                             pl_append(&tmp, pi, pj);
                     }
-                    pl_unique(&tmp);
+                    /* pl_unique removed */
                     pl_free(&arru);
                     arru = tmp;
                 }
@@ -496,10 +473,11 @@ void mtr_step(double **Q, double **v, double *m,
 
         levmax = 0;
         {
-            int pi, pj;
-            for (pi = 0; pi < n; pi++)
-                for (pj = 0; pj < n; pj++)
-                    if (levc[pi][pj] > levmax) levmax = levc[pi][pj];
+            int p;
+            for (p = 0; p < arru.n; p++) {
+                int l = levc[arru.p[p].i][arru.p[p].j];
+                if (l > levmax) levmax = l;
+            }
         }
 
         if (levmax > 1)
