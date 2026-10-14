@@ -20,6 +20,55 @@
    Helper: PairList operations (beyond those in mtr.h)
    ─────────────────────────────────────────────────────────────────────────── */
 
+/* ───────────────────────────────────────────────────────────────────────────
+   Persistent scratch buffers.
+   These replace per-call/per-pass allocations of n-sized arrays.  They are
+   (re)allocated only when n changes.  calc_pairs and the body-list helper
+   are never re-entered, so one shared set suffices; driftop's saved state
+   is held while deeper levels run, so it gets one buffer per level.
+   ─────────────────────────────────────────────────────────────────────────── */
+static int     sc_n = -1;
+static int    *sc_keplev = NULL;   /* zero between uses                     */
+static char   *sc_mark   = NULL;   /* zero between uses                     */
+static int    *sc_list   = NULL;   /* bodies touched in the current call    */
+static double **sc_Q0[LEVMAX + 2];
+static double **sc_v0[LEVMAX + 2];
+static int    *sc_kp[LEVMAX + 2];
+
+static void scratch_ensure(int n)
+{
+    int l;
+    if (n == sc_n) return;
+    free(sc_keplev); free(sc_mark); free(sc_list);
+    for (l = 0; l < LEVMAX + 2; l++) {
+        if (sc_Q0[l]) free2d(sc_Q0[l], 3);
+        if (sc_v0[l]) free2d(sc_v0[l], 3);
+        free(sc_kp[l]);
+        sc_Q0[l] = NULL; sc_v0[l] = NULL; sc_kp[l] = NULL;
+    }
+    sc_keplev = (int *)calloc(n, sizeof(int));
+    sc_mark   = (char *)calloc(n, 1);
+    sc_list   = (int *)malloc(n * sizeof(int));
+    if (!sc_keplev || !sc_mark || !sc_list) {
+        fprintf(stderr, "scratch_ensure: malloc failed\n"); exit(1);
+    }
+    sc_n = n;
+}
+
+static void scratch_level(int n, int lev)
+{
+    scratch_ensure(n);
+    if (lev < 0 || lev >= LEVMAX + 2) {
+        fprintf(stderr, "scratch_level: level %d out of range\n", lev); exit(1);
+    }
+    if (!sc_Q0[lev]) {
+        sc_Q0[lev] = alloc2d(3, n);
+        sc_v0[lev] = alloc2d(3, n);
+        sc_kp[lev] = (int *)malloc(n * sizeof(int));
+        if (!sc_kp[lev]) { fprintf(stderr, "scratch_level: malloc failed\n"); exit(1); }
+    }
+}
+
 static void pl_all_pairs(PairList *pl, int n)
 {
     int i, j;
@@ -38,32 +87,39 @@ static void pl_all_pairs(PairList *pl, int n)
 void calc_pairs(int lev, int **levc, int n,
                 PairList *arru, PairList *indv, int *kpairs, int *nk)
 {
-    int k, b;
-    int *keplevels = (int *)calloc(n, sizeof(int));
-    if (!keplevels) { fprintf(stderr, "calc_pairs: malloc failed\n"); exit(1); }
+    /* One pass over arru builds both indv and the per-body Kepler level.
+       Only bodies appearing in arru are touched (previously all n bodies
+       were allocated, zeroed and scanned on every pass).  kpairs is filled in
+       order of first appearance in arru rather than ascending body index.
+       The order does not affect results: each body's Kepler step reads and
+       writes only that body's own Q and v, and the solver keeps no state
+       between calls. */
+    int k, t, nt = 0;
+    int *keplevels;
+    scratch_ensure(n);
+    keplevels = sc_keplev;
 
     pl_init(indv, arru->n > 0 ? arru->n : 1);
-    for (k = 0; k < arru->n; k++) {
-        int i = arru->p[k].i;
-        int j = arru->p[k].j;
-        if (levc[i][j] == lev)
-            pl_append(indv, i, j);
-    }
-
     for (k = 0; k < arru->n; k++) {
         int i   = arru->p[k].i;
         int j   = arru->p[k].j;
         int lij = levc[i][j];
+        if (lij == lev)
+            pl_append(indv, i, j);
+        if (!sc_mark[i]) { sc_mark[i] = 1; sc_list[nt++] = i; }
+        if (!sc_mark[j]) { sc_mark[j] = 1; sc_list[nt++] = j; }
         if (lij > keplevels[i]) keplevels[i] = lij;
         if (lij > keplevels[j]) keplevels[j] = lij;
     }
 
     *nk = 0;
-    for (b = 0; b < n; b++)
+    for (t = 0; t < nt; t++) {
+        int b = sc_list[t];
         if (keplevels[b] == lev)
             kpairs[(*nk)++] = b;
-
-    free(keplevels);
+        keplevels[b] = 0;      /* restore scratch to all-zero */
+        sc_mark[b]   = 0;
+    }
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
@@ -78,6 +134,7 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
     int k, b;
     int any_pos, any_neg;
     PairList indv_pos, indv_neg;
+    int *pos_idx;   /* pos_idx[q] = index in indv of promoted pair q */
     int *id_repeat, n_repeat;
     int is_final;
     (void)n;
@@ -91,13 +148,15 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
 
     pl_init(&indv_pos, indv->n);
     pl_init(&indv_neg, indv->n);
+    pos_idx = (int *)malloc(indv->n * sizeof(int));
+    if (!pos_idx) { fprintf(stderr, "update_levels: malloc failed\n"); exit(1); }
     any_pos = 0; any_neg = 0;
 
     for (k = 0; k < indv->n; k++) {
         int i = indv->p[k].i;
         int j = indv->p[k].j;
         int D = levcp[k] - levc[i][j];
-        if (D > 0) { pl_append(&indv_pos, i, j); any_pos = 1; }
+        if (D > 0) { pos_idx[indv_pos.n] = k; pl_append(&indv_pos, i, j); any_pos = 1; }
         if (D < 0) { pl_append(&indv_neg, i, j); any_neg = 1; }
     }
 
@@ -116,19 +175,16 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
                steps use the correct (finer) level, but do not request
                a repeat. Signalled to the caller via return value 2,
                distinct from the normal "no repeat needed" case (0). */
+            /* pos_idx[k] is this pair's index in indv, recorded when
+               indv_pos was built (replaces an O(|indv|) linear search) */
             for (k = 0; k < indv_pos.n; k++) {
                 int i = indv_pos.p[k].i;
                 int j = indv_pos.p[k].j;
-                int p2;
-                for (p2 = 0; p2 < indv->n; p2++) {
-                    if (indv->p[p2].i == i && indv->p[p2].j == j) {
-                        levc[i][j] = levcp[p2];
-                        levc[j][i] = levcp[p2];
-                        break;
-                    }
-                }
+                levc[i][j] = levcp[pos_idx[k]];
+                levc[j][i] = levcp[pos_idx[k]];
             }
             pl_free(&indv_pos); pl_free(&indv_neg);
+            free(pos_idx);
             free(id_repeat);
             return 2;
         }
@@ -142,6 +198,22 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
         PairList arru_new;
         if (!inR) { fprintf(stderr, "update_levels: malloc failed\n"); exit(1); }
 
+        /* Global-level shortcut.  At level 1, arru is the complete list of
+           all pairs of the n-1 planets.  If every one of them has
+           levc >= 1, the pairs form a complete graph, so the closure below
+           necessarily contains every planet and arru_new would equal arru,
+           pair for pair and in the same order.  In that case skip the
+           closure and the copy and keep arru unchanged.  If any pair has
+           level 0 (possible only for separations below the smallest cutoff),
+           fall through to the general computation. */
+        int full = 0;
+        if (lev == 1 && n - 1 >= 2 && arru->n == (n - 1) * (n - 2) / 2) {
+            full = 1;
+            for (k = 0; k < arru->n; k++)
+                if (levc[arru->p[k].i][arru->p[k].j] < 1) { full = 0; break; }
+        }
+
+        if (!full) {
         /* Seed: bodies of promoted pairs */
         for (k = 0; k < indv_pos.n; k++) {
             inR[indv_pos.p[k].i] = 1;
@@ -174,6 +246,7 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
         /* pl_unique removed: arru_new is a filter of a duplicate-free list */
         pl_free(arru);
         *arru = arru_new;
+        } /* end if (!full) */
         free(inR);
 
         n_repeat = 0;
@@ -217,21 +290,17 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
         }
 
         /* Update levc for promoted pairs */
+        /* pos_idx[k] is this pair's index in indv, recorded when
+           indv_pos was built (replaces an O(|indv|) linear search) */
         for (k = 0; k < indv_pos.n; k++) {
             int i = indv_pos.p[k].i;
             int j = indv_pos.p[k].j;
-            /* Find index of this pair in indv to get levcp value */
-            int p2;
-            for (p2 = 0; p2 < indv->n; p2++) {
-                if (indv->p[p2].i == i && indv->p[p2].j == j) {
-                    levc[i][j] = levcp[p2];
-                    levc[j][i] = levcp[p2];
-                    break;
-                }
-            }
+            levc[i][j] = levcp[pos_idx[k]];
+            levc[j][i] = levcp[pos_idx[k]];
         }
 
         pl_free(&indv_pos); pl_free(&indv_neg);
+        free(pos_idx);
         free(id_repeat);
         /* Log levc state */
         return 1;
@@ -248,6 +317,7 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
     }
 
     pl_free(&indv_pos); pl_free(&indv_neg);
+    free(pos_idx);
     free(id_repeat);
     /* Log levc state */
     return 0;
@@ -265,12 +335,15 @@ void driftop(double **Q, double **v, double *m,
     int levmax, i, k;
     PairList arru, arru_saved, indv;
     int flag, repeated;
-    double **Q0     = alloc2d(3, n);
-    double **v0     = alloc2d(3, n);
-    int    *kpairs  = (int *)malloc(n * sizeof(int));
+    double **Q0, **v0;
+    int    *kpairs;
     int nk;
 
-    if (!kpairs) { fprintf(stderr, "driftop: malloc failed\n"); exit(1); }
+    /* Per-level persistent buffers (previously allocated on every call) */
+    scratch_level(n, lev);
+    Q0     = sc_Q0[lev];
+    v0     = sc_v0[lev];
+    kpairs = sc_kp[lev];
 
     /* Refine arru: keep only pairs at lev or above */
     pl_init(&arru, arru_in->n > 0 ? arru_in->n : 1);
@@ -288,12 +361,25 @@ void driftop(double **Q, double **v, double *m,
         pl_copy(&arru_saved, &arru);
         repeated = 0;
 
-        /* Save state */
-        for (k = 0; k < 3; k++) {
-            int b;
-            for (b = 0; b < n; b++) {
-                Q0[k][b] = Q[k][b];
-                v0[k][b] = v[k][b];
+        /* Save state of the bodies in arru only.  Within this substep only
+           those bodies are kicked, drifted (here or at deeper levels), or
+           reset by update_levels (its rewind set is a subset of arru), so
+           the saved values of all other bodies are never read.  Previously
+           all n bodies were copied on every substep. */
+        {
+            int p, nb = 0, t, b;
+            for (p = 0; p < arru.n; p++) {
+                int pi = arru.p[p].i, pj = arru.p[p].j;
+                if (!sc_mark[pi]) { sc_mark[pi] = 1; sc_list[nb++] = pi; }
+                if (!sc_mark[pj]) { sc_mark[pj] = 1; sc_list[nb++] = pj; }
+            }
+            for (t = 0; t < nb; t++) {
+                b = sc_list[t];
+                for (k = 0; k < 3; k++) {
+                    Q0[k][b] = Q[k][b];
+                    v0[k][b] = v[k][b];
+                }
+                sc_mark[b] = 0;
             }
         }
 
@@ -399,9 +485,7 @@ void driftop(double **Q, double **v, double *m,
     }
 
     pl_free(&arru);
-    free2d(Q0, 3);
-    free2d(v0, 3);
-    free(kpairs);
+    /* Q0, v0, kpairs are persistent per-level buffers: not freed here */
 }
 
 /* ───────────────────────────────────────────────────────────────────────────

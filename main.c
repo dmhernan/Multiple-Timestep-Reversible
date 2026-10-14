@@ -1,4 +1,6 @@
+#define _POSIX_C_SOURCE 200112L   /* for isatty()/fileno() under -std=c99 */
 #include "mtr.h"
+#include <unistd.h>
 
 int    G_FLAG    = 0;
 double G_RHILL   = 0.0;
@@ -32,12 +34,34 @@ static double sep_rhill(double **Q, int j, int k)
     return sqrt(s) / G_RHILL;
 }
 
+/* Progress display on stdout.
+   If stdout is a terminal: a single status bar redrawn in place with '\r'.
+   If stdout is redirected (file/pipe): one plain line per call, so log files
+   don't fill up with carriage-return garbage. */
+static void show_progress(int pct, double t_yr, double tmax_yr, int is_tty)
+{
+    if (t_yr > tmax_yr) t_yr = tmax_yr;   /* last step overshoots tmax by < 1 step; display only */
+    if (is_tty) {
+        const int width = 40;
+        int filled = pct * width / 100, i;
+        putchar('\r');
+        putchar('[');
+        for (i = 0; i < width; i++) putchar(i < filled ? '#' : '-');
+        printf("] %3d%%  t = %.2f / %.2f yr", pct, t_yr, tmax_yr);
+        if (pct >= 100) putchar('\n');
+    } else {
+        printf("progress: %3d%%  (t = %.2f yr of %.2f yr)\n", pct, t_yr, tmax_yr);
+    }
+    fflush(stdout);
+}
+
 int main(int argc, char *argv[])
 {
     int    n, nstep, steps[LEVMAX];
     double h, tmax, t;
     int    output_interval;
     int    use_testcase;
+    int    last_pct, is_tty;
     double E0, E, L0[3], L[3];
     double a1, em1, a2, em2;
     FILE  *fcons;
@@ -53,8 +77,10 @@ int main(int argc, char *argv[])
 
     if (use_testcase == 1) {
         h               = 0.01 * 365.25;
-        tmax            = 100.0 * 365.25;
+        tmax            = 1000.0 * 365.25;
         output_interval = 1;
+        //tmax            = 100000.0 * 365.25;
+        //output_interval = 1000;
         G_FLAG          = 0;
         G_RHILL         = 0.0;
         n = 5;
@@ -186,6 +212,9 @@ int main(int argc, char *argv[])
     /* Main integration loop */
     t     = 0.0;
     nstep = 0;
+    last_pct = 0;
+    is_tty   = isatty(fileno(stdout));
+    if (is_tty) show_progress(0, 0.0, tmax / 365.25, is_tty);
 
     while (t < tmax) {
         nstep++;
@@ -193,6 +222,17 @@ int main(int argc, char *argv[])
         G_TIME = t;
         mtr_step(Q, v, m, n, levc, hlev, rlev, rlev_sq);
         t += h;
+
+        /* Redraw only when the integer percent complete increases
+           (at most ~100 updates, whatever tmax is). */
+        {
+            int pct = (int)(100.0 * t / tmax);
+            if (pct > 100) pct = 100;
+            if (pct > last_pct) {
+                show_progress(pct, t / 365.25, tmax / 365.25, is_tty);
+                last_pct = pct;
+            }
+        }
 
         if (nstep % output_interval == 0) {
             consqv(m, n, Q, v, &E, L);
@@ -214,6 +254,11 @@ int main(int argc, char *argv[])
             }
         }
     }
+
+    /* Make sure the display ends at 100% (guards against rounding in the
+       percent calculation on the very last step). */
+    if (last_pct < 100)
+        show_progress(100, t / 365.25, tmax / 365.25, is_tty);
 
     /* Final diagnostics */
     consqv(m, n, Q, v, &E, L);
