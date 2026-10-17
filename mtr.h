@@ -34,6 +34,21 @@ extern double G_TIME;        /* current physical time (days)          */
 extern int    G_RARE_FWD;    /* 1 = forward pass, 0 = backward pass   */
 extern int    G_RARE_N;      /* current n value being tested          */
 
+/* Overlap diagnostic (read-only; does not change the integration):
+   a body that is in a promoted pair (D>0) AND in a demoted pair (D<0)
+   in the same update_levels call. */
+#define OVL_LEVMAX 64
+extern long   G_OVL_CALLS;        /* update_levels calls with indv->n > 0     */
+extern long   G_OVL_POS;          /* ... of which any pair promoted           */
+extern long   G_OVL_NEG;          /* ... of which any pair demoted            */
+extern long   G_OVL_BOTH;         /* ... of which both (any body)             */
+extern long   G_OVL_EVENTS;       /* ... of which >=1 body in both            */
+extern long   G_OVL_EVENTS_FINAL; /* events on the final substep (is_final)   */
+extern long   G_OVL_BODIES;       /* sum over events of # such bodies         */
+extern long   G_OVL_EVENTS_LEV[OVL_LEVMAX]; /* events per level               */
+extern char  *G_OVL_MARK;         /* scratch [n], all zero between calls      */
+extern FILE  *G_OVL_FILE;         /* per-event log, or NULL to disable        */
+
 /* ─── Solver status codes ────────────────────────────────────────────────── */
 #define SUCCESS  1
 #define FAILURE  0
@@ -59,6 +74,7 @@ typedef struct {
 typedef struct {
     int    n;                    /* number of bodies                          */
     double *m;                   /* masses (solar masses)         [n]         */
+    double *rad;                 /* physical radii (au)           [n]         */
     double **Q;                  /* DHC positions                 [3][n]      */
     double **v;                  /* velocities                    [3][n]      */
     int    **levc;               /* level assignments             [n][n]      */
@@ -73,7 +89,7 @@ typedef struct {
     int    flag;                 /* 0 = timescale criterion, 1 = Hill radius  */
     double rhill;                /* Hill radius (au), used if flag==1         */
     int    cas;                  /* coordinate case (1 = Dem. Heliocentric)   */
-    double dt_snap;              /* snapshot interval; 0 = no snapshots       */
+    double dt_snap;              /* snapshot interval (days); 0 = no snaps    */
     char   snap_dir[256];        /* snapshot output directory                 */
 } SimState;
 
@@ -248,8 +264,10 @@ void   consqv(double *m, int n, double **Q, double **v,
               double *E, double L[3]);
 void   calcorb(double **Q, double **v, double *m,
                int ik, int jk, double *a, double *em);
+void   calcorb_helio(double mu, const double dx[3], const double dv[3],
+                     double *a, double *e, double *inc);
 void   write_snapshot(const char *dir, int isnap, double t,
-                      double *m, double **Q, double **v, int n);
+                      double *m, double *rad, double **Q, double **v, int n);
 
 /* init.c */
 void   initv(double h, double rmax, double rsub, int hsub, int levtot,

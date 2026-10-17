@@ -49,42 +49,11 @@ void consqv(double *m, int n, double **Q, double **v, double *E, double L[3])
     free2d(pdummy, 3);
 }
 
-void calcorb(double **Q, double **v, double *m, int ik, int jk,
-             double *a, double *em)
-{
-    double qr[3], vr[3];
-    double qrm, vrm2, M, mudan, mu;
-    double h[3], pr[3], e[3], hc[3], tmp[3];
-    int k;
-
-    M     = m[ik] + m[jk];
-    mu    = m[ik] * m[jk] / M;
-    mudan = GNEWT * M;
-
-    qrm = 0.0; vrm2 = 0.0;
-    for (k = 0; k < 3; k++) {
-        qr[k]  = Q[k][ik] - Q[k][jk];
-        vr[k]  = v[k][ik] - v[k][jk];
-        qrm   += qr[k] * qr[k];
-        vrm2  += vr[k] * vr[k];
-    }
-    qrm = sqrt(qrm);
-
-    for (k = 0; k < 3; k++) pr[k] = mu * vr[k];
-    cross3(qr, vr, hc);
-    for (k = 0; k < 3; k++) h[k] = mu * hc[k];
-    cross3(pr, h, tmp);
-    for (k = 0; k < 3; k++)
-        e[k] = (tmp[k] - GNEWT * mu * mu * M * qr[k] / qrm)
-               / (GNEWT * mu * mu * M);
-
-    *em = sqrt(e[0]*e[0] + e[1]*e[1] + e[2]*e[2]);
-    *a  = 1.0 / (2.0 / qrm - vrm2 / mudan);
-}
-
-/* --- Snapshot output (Below 2 functions are the ONLY addition to David's code) --- */
-static void calcorb_helio(double mu, const double dx[3], const double dv[3],
-                          double *a, double *e, double *inc)
+/* Osculating orbital elements (a, e, inc) from relative position dx and
+   relative velocity dv about a center with gravitational parameter mu.
+   inc is measured from the xy-plane (z = reference axis), in radians. */
+void calcorb_helio(double mu, const double dx[3], const double dv[3],
+                   double *a, double *e, double *inc)
 {
     double r, v2, rv, hvec[3], hmag, evec[3];
     int k;
@@ -107,9 +76,15 @@ static void calcorb_helio(double mu, const double dx[3], const double dv[3],
     *inc = (hmag > 0.0) ? acos(hvec[2] / hmag) : 0.0;
 }
 
-/* GPLUM-compatible snapshot (heliocentric, central body NOT included) with (a, e, inc)*/
+/* Write a GPLUM-compatible snapshot (heliocentric coordinates, central body
+   NOT included), with three extra columns (a, e, inc) appended.
+     header row : time n_body id_next 0 ... 0            (13 columns)
+     body row   : id mass r_planet f x y z vx vy vz nn flag a e inc
+   Positions/velocities are heliocentric: x_i - x_0, v_i - v_0, computed from
+   the DHC positions Q and Cartesian velocities v.
+   All quantities are in MTR internal units (au, days, solar masses, rad). */
 void write_snapshot(const char *dir, int isnap, double t,
-                    double *m, double **Q, double **v, int n)
+                    double *m, double *rad, double **Q, double **v, int n)
 {
     char fname[512];
     FILE *fp;
@@ -144,11 +119,44 @@ void write_snapshot(const char *dir, int isnap, double t,
             "%d\t%.15e\t%.15e\t%.15e\t"
             "%.15e\t%.15e\t%.15e\t%.15e\t%.15e\t%.15e\t"
             "%d\t%d\t%.15e\t%.15e\t%.15e\n",
-            i - 1, m[i], 0.0, 1.0,
+            i - 1, m[i], rad ? rad[i] : 0.0, 1.0,
             dx[0], dx[1], dx[2], dv[0], dv[1], dv[2],
             0, 0, a, e, inc);
     }
 
     fclose(fp);
     free2d(x, 3); free2d(Pdummy, 3); free2d(pdummy, 3);
+}
+
+void calcorb(double **Q, double **v, double *m, int ik, int jk,
+             double *a, double *em)
+{
+    double qr[3], vr[3];
+    double qrm, vrm2, M, mudan, mu;
+    double h[3], pr[3], e[3], hc[3], tmp[3];
+    int k;
+
+    M     = m[ik] + m[jk];
+    mu    = m[ik] * m[jk] / M;
+    mudan = GNEWT * M;
+
+    qrm = 0.0; vrm2 = 0.0;
+    for (k = 0; k < 3; k++) {
+        qr[k]  = Q[k][ik] - Q[k][jk];
+        vr[k]  = v[k][ik] - v[k][jk];
+        qrm   += qr[k] * qr[k];
+        vrm2  += vr[k] * vr[k];
+    }
+    qrm = sqrt(qrm);
+
+    for (k = 0; k < 3; k++) pr[k] = mu * vr[k];
+    cross3(qr, vr, hc);
+    for (k = 0; k < 3; k++) h[k] = mu * hc[k];
+    cross3(pr, h, tmp);
+    for (k = 0; k < 3; k++)
+        e[k] = (tmp[k] - GNEWT * mu * mu * M * qr[k] / qrm)
+               / (GNEWT * mu * mu * M);
+
+    *em = sqrt(e[0]*e[0] + e[1]*e[1] + e[2]*e[2]);
+    *a  = 1.0 / (2.0 / qrm - vrm2 / mudan);
 }

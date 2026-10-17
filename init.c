@@ -162,11 +162,15 @@ void read_input(const char *fname, SimState *sim, double **q, double **v)
     while (fgets(line, sizeof(line), fp) && i < sim->n) {
         if (line[0] == '#' || line[0] == '\n') continue;
         if (strchr("0123456789-+.", line[0])) {
-            if (sscanf(line, "%lf %lf %lf %lf %lf %lf %lf",
-                       &sim->m[i],
-                       &q[0][i], &q[1][i], &q[2][i],
-                       &v[0][i], &v[1][i], &v[2][i]) == 7)
+            double radval = 0.0;
+            int nread = sscanf(line, "%lf %lf %lf %lf %lf %lf %lf %lf",
+                               &sim->m[i],
+                               &q[0][i], &q[1][i], &q[2][i],
+                               &v[0][i], &v[1][i], &v[2][i], &radval);
+            if (nread >= 7) {
+                if (sim->rad) sim->rad[i] = (nread == 8) ? radval : 0.0;
                 i++;
+            }
         }
     }
     fclose(fp);
