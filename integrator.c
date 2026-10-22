@@ -27,6 +27,15 @@
    are never re-entered, so one shared set suffices; driftop's saved state
    is held while deeper levels run, so it gets one buffer per level.
    ─────────────────────────────────────────────────────────────────────────── */
+/* Pairs demoted since the enclosing level last looked (DEMOTION FIX).
+   A pair demoted at the end of a level-(l+1) block is, at that same instant,
+   re-examined by the enclosing level-l substep, before it receives any further
+   kick; if that substep also ends its block, it may be demoted again. */
+static PairList JD = {NULL, 0, 0};
+static void jd_push(int i, int j) {
+    if (JD.p == NULL) pl_init(&JD, 64);
+    pl_append(&JD, i, j);
+}
 static int     sc_n = -1;
 static int    *sc_keplev = NULL;   /* zero between uses                     */
 static char   *sc_mark   = NULL;   /* zero between uses                     */
@@ -67,6 +76,26 @@ static void scratch_level(int n, int lev)
         sc_kp[lev] = (int *)malloc(n * sizeof(int));
         if (!sc_kp[lev]) { fprintf(stderr, "scratch_level: malloc failed\n"); exit(1); }
     }
+}
+
+/* EXPERIMENTAL FIX: after a rewind, pairs that were reset and sat below the
+   current level (lev_saved > lev) get their substep-start level back, so that
+   level changes made inside the discarded trial do not leak into the repeat.
+   Promoted pairs at the current level (lev_saved == lev) keep their new level. */
+static void restore_deeper_levels(int **levc, const PairList *saved, const int *lev_saved,
+                                  const PairList *rewound, int lev, int n)
+{
+    int p;
+    scratch_ensure(n);
+    for (p = 0; p < rewound->n; p++) { sc_mark[rewound->p[p].i] = 1; sc_mark[rewound->p[p].j] = 1; }
+    for (p = 0; p < saved->n; p++) {
+        int a = saved->p[p].i, b = saved->p[p].j;
+        if ((sc_mark[a] || sc_mark[b]) && lev_saved[p] > lev) {
+            levc[a][b] = lev_saved[p];
+            levc[b][a] = lev_saved[p];
+        }
+    }
+    for (p = 0; p < rewound->n; p++) { sc_mark[rewound->p[p].i] = 0; sc_mark[rewound->p[p].j] = 0; }
 }
 
 static void pl_all_pairs(PairList *pl, int n)
@@ -267,6 +296,7 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
                     if (!seen[i] && !seen[j]) {
                         levc[i][j]--;
                         levc[j][i]--;
+                        jd_push(i, j);
                         G_RARE_EDGE++;
                         if (G_RARE_FILE)
                             fprintf(G_RARE_FILE, "%.6f  %s  %d\n",
@@ -313,6 +343,7 @@ int update_levels(double **Q0, double **v0, double **Q, double **v,
             int j = indv_neg.p[k].j;
             levc[i][j]--;
             levc[j][i]--;
+            jd_push(i, j);
         }
     }
 
@@ -360,6 +391,8 @@ void driftop(double **Q, double **v, double *m,
         pl_init(&arru_saved, arru.cap);
         pl_copy(&arru_saved, &arru);
         repeated = 0;
+        int *lev_saved = (int *)malloc((arru.n > 0 ? arru.n : 1) * sizeof(int));
+        { int p; for (p = 0; p < arru.n; p++) lev_saved[p] = levc[arru.p[p].i][arru.p[p].j]; }
 
         /* Save state of the bodies in arru only.  Within this substep only
            those bodies are kicked, drifted (here or at deeper levels), or
@@ -424,16 +457,38 @@ void driftop(double **Q, double **v, double *m,
                 }
             }
 
+            int jd_mark = (JD.p != NULL) ? JD.n : 0;
             if (lev < levmax)
                 driftop(Q, v, m, n, lev+1, hlev, levc, rlev, rlev_sq, &arru);
 
             interact(Q, v, hlev[lev-1] / 2.0, m, n, &indv);
 
+            /* DEMOTION FIX: pairs demoted into this level by the deeper call
+               (necessarily at the end of this substep) join this substep's
+               level check, demotion only.  They are appended after the closing
+               kick, so they receive no kick at this level. */
+            int n_kicked = indv.n;
+            if (JD.p != NULL && JD.n > jd_mark) {
+                int q;
+                for (q = jd_mark; q < JD.n; q++) {
+                    int a = JD.p[q].i, b = JD.p[q].j, p2, dup = 0;
+                    if (levc[a][b] != lev) continue;              /* not (or no longer) at this level */
+                    for (p2 = n_kicked; p2 < indv.n; p2++)        /* avoid duplicates */
+                        if (indv.p[p2].i == a && indv.p[p2].j == b) { dup = 1; break; }
+                    if (!dup) pl_append(&indv, a, b);
+                }
+                JD.n = jd_mark;                                   /* consumed */
+            }
+
             /* Allocate small 1D levcp for this indv */
-            levcp = (int *)malloc(indv.n * sizeof(int));
+            levcp = (int *)malloc((indv.n > 0 ? indv.n : 1) * sizeof(int));
             if (!levcp) { fprintf(stderr, "driftop: levcp malloc failed\n"); exit(1); }
 
             calc_levels_pairs(Q, v, m, rlev, rlev_sq, hlev[0], hlev, levc, levcp, &indv);
+            {   /* re-examined pairs may only be demoted, never promoted */
+                int q;
+                for (q = n_kicked; q < indv.n; q++) if (levcp[q] > lev) levcp[q] = lev;
+            }
 
             flag = update_levels(Q0, v0, Q, v, levc, levcp,
                                  i, hsub, &indv, lev, &arru, n, 0);
@@ -443,6 +498,7 @@ void driftop(double **Q, double **v, double *m,
 
             if (flag) {
                 repeated = 1;
+                restore_deeper_levels(levc, &arru_saved, lev_saved, &arru, lev, n);
                 if (G_REPEATS) {
                     int p;
                     for (p = 0; p < arru.n; p++) {
@@ -482,6 +538,7 @@ void driftop(double **Q, double **v, double *m,
             }
         }
         pl_free(&arru_saved);
+        free(lev_saved);
     }
 
     pl_free(&arru);
@@ -513,6 +570,8 @@ void mtr_step(double **Q, double **v, double *m,
     pl_init(&arru_saved, arru.cap);
     pl_copy(&arru_saved, &arru);
     repeated = 0;
+    int *lev_saved = (int *)malloc((arru.n > 0 ? arru.n : 1) * sizeof(int));
+    { int p; for (p = 0; p < arru.n; p++) lev_saved[p] = levc[arru.p[p].i][arru.p[p].j]; }
 
     for (k = 0; k < 3; k++)
         for (b = 0; b < n; b++) {
@@ -566,6 +625,7 @@ void mtr_step(double **Q, double **v, double *m,
 
         if (levmax > 1)
             driftop(Q, v, m, n, 2, hlev, levc, rlev, rlev_sq, &arru);
+        if (JD.p != NULL) JD.n = 0;   /* DEMOTION FIX: nothing above the global level */
 
         interact(Q, v, hlev[0] / 2.0, m, n, &indv);
 
@@ -583,6 +643,7 @@ void mtr_step(double **Q, double **v, double *m,
 
         if (flag == 1) {
             repeated = 1;
+            restore_deeper_levels(levc, &arru_saved, lev_saved, &arru, 1, n);
             G_GLOBAL_REPEATS++;
             if (G_REPEATS) {
                 int p;
@@ -629,6 +690,7 @@ void mtr_step(double **Q, double **v, double *m,
 
     pl_free(&arru);
     pl_free(&arru_saved);
+    free(lev_saved);
     free2d(Q0, 3);
     free2d(v0, 3);
     free(kpairs);
